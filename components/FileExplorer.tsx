@@ -35,6 +35,7 @@ interface FileNode {
 interface Props {
   cwd: string;
   onOpenFile: (filePath: string, fileName: string, options?: OpenFileOptions) => void;
+  onOpenInIde?: (path: string) => void;
   refreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
@@ -218,6 +219,7 @@ function TreeNode({
   depth,
   cwd,
   onOpenFile,
+  onOpenInIde,
   onAtMention,
   expandedPaths,
   onToggleExpanded,
@@ -231,6 +233,7 @@ function TreeNode({
   depth: number;
   cwd: string;
   onOpenFile: (filePath: string, fileName: string, options?: OpenFileOptions) => void;
+  onOpenInIde?: (path: string) => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   expandedPaths: Set<string>;
   onToggleExpanded: (fullPath: string, open: boolean) => void;
@@ -363,6 +366,36 @@ function TreeNode({
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
           </svg>
         )}
+        {hovered && onOpenInIde && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenInIde(node.fullPath);
+            }}
+            title={node.isDir ? "在 IDE 中打开项目" : "在 IDE 中打开文件"}
+            aria-label={node.isDir ? "在 IDE 中打开项目" : "在 IDE 中打开文件"}
+            style={{
+              position: "absolute",
+              right: 28,
+              top: "50%",
+              transform: "translateY(-50%)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 22,
+              height: 22,
+              background: "transparent",
+              border: "none",
+              borderRadius: 4,
+              color: "var(--text-dim)",
+              cursor: "pointer",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "transparent"; }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
+        )}
         {onAtMention && hovered && (
           <button
             onClick={(e) => {
@@ -440,6 +473,7 @@ function TreeNode({
               depth={depth + 1}
               cwd={cwd}
               onOpenFile={onOpenFile}
+              onOpenInIde={onOpenInIde}
               onAtMention={onAtMention}
               expandedPaths={expandedPaths}
               onToggleExpanded={onToggleExpanded}
@@ -521,6 +555,7 @@ function ChangeRow({
 export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileExplorer({
   cwd,
   onOpenFile,
+  onOpenInIde,
   refreshKey,
   onAtMention,
   onAtMentions,
@@ -973,6 +1008,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                     depth={0}
                     cwd={cwd}
                     onOpenFile={onOpenFile}
+                    onOpenInIde={onOpenInIde}
                     onAtMention={onAtMention}
                     expandedPaths={searchExpanded}
                     onToggleExpanded={(fullPath, open) => {
@@ -1031,6 +1067,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 depth={0}
                 cwd={cwd}
                 onOpenFile={onOpenFile}
+                onOpenInIde={onOpenInIde}
                 onAtMention={onAtMention}
                 expandedPaths={expandedPaths}
                 onToggleExpanded={handleToggleExpanded}

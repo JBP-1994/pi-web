@@ -7,6 +7,9 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
+import { WorktreeSessionTabs } from "./WorktreeSessionTabs";
+import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
@@ -130,6 +133,78 @@ export function AppShell() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
+  // Explorer in right panel (moved from sidebar)
+  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [explorerKey, setExplorerKey] = useState(0);
+  const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [changesCount, setChangesCount] = useState(0);
+  const [changesCollapsed, setChangesCollapsed] = useState(true);
+  const fileExplorerRef = useRef<FileExplorerHandle>(null);
+  const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
+  const [ideToast, setIdeToast] = useState<string | null>(null);
+  const ideToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showIdeToast = useCallback((msg: string, isError = false) => {
+    setIdeToast((isError ? "" : "✓ ") + msg);
+    if (ideToastTimerRef.current) clearTimeout(ideToastTimerRef.current);
+    ideToastTimerRef.current = setTimeout(() => setIdeToast(null), isError ? 3500 : 2000);
+  }, []);
+  const handleOpenInIde = useCallback(async (path: string) => {
+    try {
+      const res = await fetch("/api/open-in-ide", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
+      const data = (await res.json().catch(() => ({}))) as { error?: string; command?: string };
+      if (!res.ok || data.error) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const cmd = data.command === "cursor" ? "Cursor" : data.command === "code" ? "Code" : data.command === "open" ? "系统" : "IDE";
+      showIdeToast(`已用 ${cmd} 打开`);
+    } catch (e) {
+      showIdeToast(e instanceof Error ? e.message : String(e), true);
+    }
+  }, [showIdeToast]);
+  const [rightSplitRatio, setRightSplitRatio] = useState(() => {
+    if (typeof window === "undefined") return 0.5;
+    try {
+      const v = window.localStorage.getItem("pi-web:right-split-ratio");
+      if (v) { const n = parseFloat(v); if (!isNaN(n)) return Math.min(0.8, Math.max(0.2, n)); }
+    } catch {}
+    return 0.5;
+  });
+  const rightPanelContentRef = useRef<HTMLDivElement>(null);
+  const isDraggingSplitRef = useRef(false);
+  const handleSplitMouseDown = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    isDraggingSplitRef.current = true;
+    const container = rightPanelContentRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const startY = "touches" in e ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
+    const startRatio = rightSplitRatio;
+    const onMove = (ev: MouseEvent | TouchEvent) => {
+      if (!isDraggingSplitRef.current) return;
+      const curY = "touches" in ev ? (ev as TouchEvent).touches[0].clientY : (ev as MouseEvent).clientY;
+      const delta = curY - startY;
+      const newRatio = Math.min(0.8, Math.max(0.2, startRatio + delta / rect.height));
+      setRightSplitRatio(newRatio);
+    };
+    const onUp = () => {
+      isDraggingSplitRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchmove", onMove, { passive: false });
+    window.addEventListener("touchend", onUp);
+  }, [rightSplitRatio]);
+  useEffect(() => {
+    try { window.localStorage.setItem("pi-web:right-split-ratio", String(rightSplitRatio)); } catch {}
+  }, [rightSplitRatio]);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
@@ -827,6 +902,10 @@ export function AppShell() {
 
   const handleExplorerRefresh = useCallback(() => {
     setExplorerRefreshKey((k) => k + 1);
+    setExplorerKey((k) => k + 1);
+    setExplorerRefreshDone(true);
+    if (explorerRefreshTimerRef.current) clearTimeout(explorerRefreshTimerRef.current);
+    explorerRefreshTimerRef.current = setTimeout(() => setExplorerRefreshDone(false), 2000);
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
@@ -991,72 +1070,124 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
+  // worktree-scoped sessions for the top strip (include transient draft)
+  const worktreeSessions = useMemo(() => {
+    const cwd = activeCwd;
+    if (!cwd) return [];
+    const base = sessionsWithSelection.filter((s) => s.cwd === cwd || s.cwd.startsWith(cwd + "/"));
+    if (effectiveNewSessionCwd === cwd && !selectedSession) {
+      const draftCwd = effectiveNewSessionCwd;
+      // avoid duplicate if base already contains draft id
+      if (!base.some((s) => s.id === newSessionDraftId)) {
+        base.push({
+          path: "",
+          id: newSessionDraftId,
+          cwd: draftCwd,
+          created: new Date().toISOString(),
+          modified: new Date().toISOString(),
+          messageCount: 0,
+          firstMessage: "",
+          transient: true,
+        } as SessionInfo);
+      }
+    }
+    return base;
+  }, [sessionsWithSelection, activeCwd, effectiveNewSessionCwd, selectedSession, newSessionDraftId]);
+
+  const handleTabCreate = useCallback(() => {
+    if (!activeCwd) return;
+    const tempId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    handleNewSession(tempId, activeCwd);
+  }, [activeCwd, handleNewSession]);
+
+  const handleTabDelete = useCallback(async (sessionId: string) => {
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      // replicate delete handling: pick neighbour tab if deleting selected
+      const idx = worktreeSessions.findIndex((s) => s.id === sessionId);
+      handleSessionDeleted(sessionId);
+      setRefreshKey((k) => k + 1);
+      if (selectedSession?.id === sessionId) {
+        const neighbours = worktreeSessions.filter((s) => s.id !== sessionId);
+        if (neighbours.length > 0) {
+          const nextIdx = Math.min(idx, neighbours.length - 1);
+          const next = neighbours[Math.max(0, nextIdx)];
+          if (next) handleSelectSession(next);
+        }
+      }
+    } catch {}
+  }, [worktreeSessions, selectedSession, handleSessionDeleted, handleSelectSession]);
+
+  const handleTabRename = useCallback(async (sessionId: string, newName: string) => {
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: newName }) });
+      setRefreshKey((k) => k + 1);
+      if (selectedSession?.id === sessionId) setSelectedSession((prev) => prev ? { ...prev, name: newName } : prev);
+    } catch {}
+  }, [selectedSession]);
+
+  // Auto-create transient when worktree has no sessions (Q9)
+  useEffect(() => {
+    if (!activeCwd) return;
+    if (sessionCatalog.length === 0) return;
+    // don't auto-create while a transient for this worktree already exists
+    if (effectiveNewSessionCwd === activeCwd) return;
+    if (selectedSession && (selectedSession.cwd === activeCwd || selectedSession.cwd.startsWith(activeCwd + "/"))) return;
+    if (worktreeSessions.length === 0) {
+      handleTabCreate();
+    }
+  }, [activeCwd, worktreeSessions.length, effectiveNewSessionCwd, selectedSession, sessionCatalog.length, handleTabCreate]);
+
+  // hydrate explorer open state
+  useEffect(() => { setExplorerOpen(loadExplorerOpen()); }, []);
+  useEffect(() => { if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1); }, [explorerRefreshKey]);
+  // default open current project (Q1)
+  const prevActiveCwdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeCwd) { prevActiveCwdRef.current = null; return; }
+    if (prevActiveCwdRef.current !== activeCwd) {
+      if (!explorerOpen) {
+        setExplorerOpen(true);
+        saveExplorerOpen(true);
+      }
+      if (!rightPanelOpen && !isMobile) setRightPanelOpen(true);
+    }
+    prevActiveCwdRef.current = activeCwd;
+  }, [activeCwd, explorerOpen, rightPanelOpen, isMobile]);
+
   const sidebarContent = (
     <>
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
         onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
-        onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
-        explorerRefreshKey={explorerRefreshKey}
-        onExplorerRefresh={handleExplorerRefresh}
-        onAtMention={handleAtMention}
-        onAtMentions={handleAtMentions}
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          ["models", translate("common.models")],
-          ["skills", translate("common.skills")],
-        ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
-          return (
-            <button
-              key={section}
-              type="button"
-              onClick={() => setSettingsSection(section)}
-              disabled={disabled}
-              title={disabled ? translate("settings.projectRequired") : label}
-              aria-label={label}
-              style={{
-                flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                height: 32, padding: 0, background: "none", border: "none",
-                borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-                fontSize: 12, opacity: disabled ? 0.35 : 1,
-                transition: "background 0.12s, color 0.12s",
-              }}
-              onMouseEnter={(event) => { if (!disabled) { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; } }}
-              onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
-            >
-              <SettingsSectionIcon section={section} size={14} strokeWidth={2} />
-              <span>{label}</span>
-            </button>
-          );
-        })}
+      <div style={{ padding: "8px", flexShrink: 0, display: "flex" }}>
         <button
           type="button"
           onClick={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
           title={translate("common.settings")}
           aria-label={translate("common.settings")}
           style={{
-            flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            height: 32, padding: 0, background: "none", border: "none",
+            flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-start", gap: 6,
+            height: 32, padding: "0 8px", background: "none", border: "none",
             borderRadius: 9, color: "var(--text-muted)", cursor: "pointer",
             fontSize: 12, transition: "background 0.12s, color 0.12s",
           }}
           onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
           onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
         >
-          <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, flexShrink: 0 }}>
+            <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
+          </span>
           <span>{translate("common.settings")}</span>
         </button>
       </div>
@@ -2253,6 +2384,18 @@ export function AppShell() {
         {isMobile && renderProjectTrustWarning(true)}
         </div>
 
+        {/* Worktree session strip */}
+        {activeCwd && (
+          <WorktreeSessionTabs
+            sessions={worktreeSessions}
+            selectedSessionId={selectedSession?.id ?? null}
+            onSelect={(s) => handleSelectSession(s)}
+            onCreate={handleTabCreate}
+            onDelete={handleTabDelete}
+            onRename={handleTabRename}
+          />
+        )}
+
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {showChat ? (
@@ -2372,6 +2515,7 @@ export function AppShell() {
               onCloseTab={handleCloseFileTab}
             />
           </div>
+          <button type="button" onClick={() => handleOpenInIde(activeFileTab?.filePath ?? activeCwd ?? "")} title={activeFileTab?.filePath ? "在 IDE 中打开文件" : "在 IDE 中打开项目"} aria-label={activeFileTab?.filePath ? "在 IDE 中打开文件" : "在 IDE 中打开项目"} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 4, background: "transparent", border: "none", borderRadius: 4, color: "var(--text-dim)", cursor: "pointer", flexShrink: 0 }} onMouseEnter={(e)=>{e.currentTarget.style.color="var(--accent)"; e.currentTarget.style.background="var(--bg-hover)"}} onMouseLeave={(e)=>{e.currentTarget.style.color="var(--text-dim)"; e.currentTarget.style.background="transparent"}}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3a2 2 0 0 1 2 2v4"/><path d="M10 21H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4"/><path d="M10 13l4-4 4 4"/><path d="M14 9v4"/></svg></button>
           <button
             type="button"
             onClick={() => setRightPanelOpen(false)}
@@ -2394,6 +2538,38 @@ export function AppShell() {
           </button>
         </div>
 
+          {/* Explorer (upper) */}
+          {activeCwd && (
+            <div style={{ display: "flex", flexDirection: "column", flex: explorerOpen ? `0 0 ${Math.round(rightSplitRatio * 100)}%` : "0 0 auto", minHeight: explorerOpen ? 80 : 0, overflow: "hidden", borderBottom: explorerOpen ? "1px solid var(--border)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", flexShrink: 0, height: 28, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+              <button onClick={() => setExplorerOpen((o) => { const n = !o; saveExplorerOpen(n); return n; })} style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, padding: "4px 8px", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase", textAlign: "left" }}>
+                <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: explorerOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><polyline points="3 2 7 5 3 8" /></svg>
+                {translate("files.explorer")}
+              </button>
+              {explorerOpen && changesCount > 0 && (
+                <button onClick={() => setChangesCollapsed((v) => !v)} title={translate("sidebar.changedFiles", { count: changesCount })} aria-pressed={!changesCollapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 2, background: changesCollapsed ? "none" : "var(--bg-selected)", border: "none", color: changesCollapsed ? "var(--text-dim)" : "var(--accent)", cursor: "pointer", borderRadius: 4 }}>{changesCount}</button>
+              )}
+              {explorerOpen && (
+                <button onClick={() => setFileSearchOpen((o) => !o)} title={translate("sidebar.searchFiles")} aria-pressed={fileSearchOpen} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 2, background: fileSearchOpen ? "var(--bg-selected)" : "none", border: "none", color: fileSearchOpen ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", borderRadius: 4 }}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg></button>
+              )}
+              {explorerOpen && (
+                <button onClick={() => fileExplorerRef.current?.openUploadPicker()} disabled={explorerUploadBusy} title={translate("sidebar.uploadFilesTitle")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 2, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 4 }}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m17 8-5-5-5 5" /><path d="M12 3v12" /></svg></button>
+              )}
+              <button onClick={handleExplorerRefresh} title={translate("sidebar.refreshExplorer")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 2, background: explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none", border: "none", color: explorerRefreshDone ? "#4ade80" : "var(--text-dim)", cursor: "pointer", borderRadius: 4 }}>{explorerRefreshDone ? "✓" : "↻"}</button>
+              <button onClick={() => activeCwd && handleOpenInIde(activeCwd)} title="在 IDE 中打开项目" aria-label="在 IDE 中打开项目" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, marginRight: 4, background: "transparent", border: "none", borderRadius: 4, color: "var(--text-dim)", cursor: "pointer" }} onMouseEnter={(e)=>{e.currentTarget.style.color="var(--accent)"; e.currentTarget.style.background="var(--bg-hover)"}} onMouseLeave={(e)=>{e.currentTarget.style.color="var(--text-dim)"; e.currentTarget.style.background="transparent"}}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>
+            </div>
+              {explorerOpen && (
+                <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+                  <FileExplorer ref={fileExplorerRef} cwd={activeCwd} onOpenFile={handleOpenFile} onOpenInIde={handleOpenInIde} refreshKey={explorerKey} onAtMention={handleAtMention} onAtMentions={handleAtMentions} onUploadBusyChange={setExplorerUploadBusy} changesCollapsed={changesCollapsed} onChangesCountChange={setChangesCount} fileSearchOpen={fileSearchOpen} onFileSearchOpenChange={setFileSearchOpen} />
+                </div>
+              )}
+            </div>
+          )}
+          {activeCwd && explorerOpen && (
+            <div onMouseDown={handleSplitMouseDown} onTouchStart={handleSplitMouseDown} title="拖动调节" style={{ height: 6, flexShrink: 0, cursor: "row-resize", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ width: 24, height: 1, background: "var(--border)", borderRadius: 1 }} />
+            </div>
+          )}
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div style={{ flex: 1, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
           {activeFileTab?.filePath ? (
@@ -2411,6 +2587,7 @@ export function AppShell() {
                 activeFileTab.viewerRevision ?? 0,
                 viewerState,
               )}
+              onOpenInIde={handleOpenInIde}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
               onOpenFile={(filePath) => handleOpenFile(
@@ -2426,7 +2603,9 @@ export function AppShell() {
           )}
         </div>
       </div>
-    </div>
+    </div>    {ideToast && (
+      <div style={{ position: "fixed", top: "calc(12px + env(safe-area-inset-top))", right: 12, zIndex: 1000, maxWidth: 360, padding: "8px 12px", borderRadius: 8, fontSize: 12, lineHeight: 1.4, border: "1px solid", background: ideToast.startsWith("✓") ? "var(--bg-panel)" : "#fef2f2", borderColor: ideToast.startsWith("✓") ? "var(--border)" : "#fecaca", color: ideToast.startsWith("✓") ? "var(--text)" : "#dc2626", boxShadow: "0 6px 20px rgba(0,0,0,0.12)", overflowWrap: "anywhere" }}>{ideToast}</div>
+    )}
     {settingsSection && (
       <SettingsPanel
         cwd={projectTrustCwd}
