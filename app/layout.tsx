@@ -70,6 +70,12 @@ export default function RootLayout({
       </head>
       <body translate="no" className="notranslate" suppressHydrationWarning>
         {children}
+        {/* 预 hydration 将缓存宽度写到 :root（documentElement），React 不管理 html style，避免元素级 inline var 与 client props 集不一致 → 无 mismatch，且 CSS 级联生效 */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var w=parseInt(window.localStorage.getItem("pi-sidebar-width")||"",10);if(isFinite(w)&&w>0)document.documentElement.style.setProperty("--sidebar-width",w+"px")}catch(e){}})();`,
+          }}
+        />
         <PwaRegistration />
       </body>
     </html>
