@@ -9,7 +9,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { WorktreeSessionTabs } from "./WorktreeSessionTabs";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
-import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
+import { saveExplorerOpen } from "@/lib/file-explorer-state";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
@@ -1138,22 +1138,7 @@ export function AppShell() {
     }
   }, [activeCwd, worktreeSessions.length, effectiveNewSessionCwd, selectedSession, sessionCatalog.length, handleTabCreate]);
 
-  // hydrate explorer open state
-  useEffect(() => { setExplorerOpen(loadExplorerOpen()); }, []);
   useEffect(() => { if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1); }, [explorerRefreshKey]);
-  // default open current project (Q1)
-  const prevActiveCwdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeCwd) { prevActiveCwdRef.current = null; return; }
-    if (prevActiveCwdRef.current !== activeCwd) {
-      if (!explorerOpen) {
-        setExplorerOpen(true);
-        saveExplorerOpen(true);
-      }
-      if (!rightPanelOpen && !isMobile) setRightPanelOpen(true);
-    }
-    prevActiveCwdRef.current = activeCwd;
-  }, [activeCwd, explorerOpen, rightPanelOpen, isMobile]);
 
   const sidebarContent = (
     <>
@@ -2538,6 +2523,7 @@ export function AppShell() {
           </button>
         </div>
 
+        <div ref={rightPanelContentRef} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
           {/* Explorer (upper) */}
           {activeCwd && (
             <div style={{ display: "flex", flexDirection: "column", flex: explorerOpen ? `0 0 ${Math.round(rightSplitRatio * 100)}%` : "0 0 auto", minHeight: explorerOpen ? 80 : 0, overflow: "hidden", borderBottom: explorerOpen ? "1px solid var(--border)" : "none" }}>
@@ -2602,8 +2588,10 @@ export function AppShell() {
             </div>
           )}
         </div>
+        </div>
       </div>
-    </div>    {ideToast && (
+    </div>
+    {ideToast && (
       <div style={{ position: "fixed", top: "calc(12px + env(safe-area-inset-top))", right: 12, zIndex: 1000, maxWidth: 360, padding: "8px 12px", borderRadius: 8, fontSize: 12, lineHeight: 1.4, border: "1px solid", background: ideToast.startsWith("✓") ? "var(--bg-panel)" : "#fef2f2", borderColor: ideToast.startsWith("✓") ? "var(--border)" : "#fecaca", color: ideToast.startsWith("✓") ? "var(--text)" : "#dc2626", boxShadow: "0 6px 20px rgba(0,0,0,0.12)", overflowWrap: "anywhere" }}>{ideToast}</div>
     )}
     {settingsSection && (
