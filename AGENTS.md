@@ -224,6 +224,32 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 
 ---
 
+## Fork 定制约束（本仓库为 agegr/pi-web 的 fork，降低上游合并冲突）
+
+> 目标：`main` 永远是 `upstream/main` 的镜像；所有定制在 `custom/*` 分支，拉上游时仅 `eslint.config.mjs` 4 行 `ignores` 级别的微冲突。
+
+### Agent 必须遵守
+
+1. **先判断是否必须改上游文件** — 能用新增文件解决的，绝不改存量：
+   - 优先：`docs/custom/*`、`scripts/*`、`*.md`、`.editorconfig`、`.vscode/*`、`pnpm-workspace.yaml`
+   - 次选：新增 `lib/custom-*` / `components/custom/*` 并通过入口导入，而非直接改 `lib/rpc-manager.ts` / `hooks/useAgentSession.ts`
+   - 禁止：全量格式化、重命名、移动上游文件（产生 2k+ diff 的 `indent` 类改动）
+
+2. **必须改上游文件时** — 最小手术：
+   - `git diff upstream/main -- <file>` 先看上游近期改动
+   - 单文件单职责，一处一提交，保留原有缩进/引号/分号风格（由 `.editorconfig` 约束）
+   - 不改 `package-lock.json` / `pnpm-lock.yaml` 除非依赖确实变更；不提交 `.next/` 产物
+   - 关键文件（高频上游变更）尽量只 append/新增分支逻辑，不重写：`lib/rpc-manager.ts`、`lib/session-reader.ts`、`hooks/useAgentSession.ts`、`app/api/agent/*`、`components/AppShell.tsx`
+
+3. **分支纪律** — 代理不得直接在 `main` 提交：
+   - 定制一律在 `custom/*`（当前为 `custom/dev`），`main` 由人执行 `git sync` 同步上游
+   - 提交信息 `type(scope): 中文描述`，fork 定制加 `custom:` 前缀更易 cherry-pick（如 `chore(custom): ...`）
+
+4. **自检** — 提交前必须：
+   - `git diff main..HEAD --stat` 确认仅涉及预期文件
+   - `npm run lint` 无新增非上游已有告警
+   - `git log --oneline main..HEAD` 为线性，无 `Merge` 泡（用 `rebase` 而非 `merge`）
+
 ## CSS Variables (`app/globals.css`)
 
 ```
