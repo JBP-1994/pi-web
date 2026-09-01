@@ -35,6 +35,7 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+  if (CACHE_VERSION === "dev") return;
   const { request } = event;
   if (request.method !== "GET") return;
 

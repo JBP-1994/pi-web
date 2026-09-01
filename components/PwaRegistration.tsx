@@ -4,7 +4,10 @@ import { useEffect } from "react";
 
 export function PwaRegistration() {
   useEffect(() => {
-    if (process.env.NODE_ENV !== "production" || !("serviceWorker" in navigator)) {
+    if (!("serviceWorker" in navigator)) return;
+    if (process.env.NODE_ENV !== "production") {
+      void navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.unregister()));
+      if ("caches" in window) void caches.keys().then((keys) => Promise.all(keys.filter((k) => k.startsWith("pi-web-")).map((k) => caches.delete(k))));
       return;
     }
 
