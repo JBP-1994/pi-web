@@ -5,12 +5,16 @@ const eslintConfig = [
   ...coreWebVitals,
   ...typescript,
   {
+    ignores: [".next/**", "out/**", "build/**", "coverage/**", "node_modules/**", "next-env.d.ts"],
+  },
+  {
     rules: {
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",
       "react-hooks/set-state-in-effect": "off",
     },
   },
+
 ];
 
 export default eslintConfig;
