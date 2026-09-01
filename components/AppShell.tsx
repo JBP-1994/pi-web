@@ -32,7 +32,7 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { setupPushSubscription } from "@/lib/push-client";
-import { getInitialNavigation } from "@/lib/initial-navigation";
+import { buildNavigationSearch, getInitialNavigation } from "@/lib/initial-navigation";
 import {
   clearLastOpen,
   getLastOpenSession,
@@ -546,7 +546,9 @@ export function AppShell() {
   }, [selectedSession]);
 
   useEffect(() => {
-    const requestedCwd = initialNavigation.requestedCwd;
+    // session > worktree > project — if session present, ignore worktree/project for new-session init
+    if (initialNavigation.sessionId) return;
+    const requestedCwd = initialNavigation.worktreePath ?? initialNavigation.requestedCwd ?? initialNavigation.projectKey;
     if (!requestedCwd) return;
 
     const controller = new AbortController();
@@ -590,32 +592,32 @@ export function AppShell() {
   const restoreWorkspaceContext = useCallback((projectKey: string) => {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
-    if (!lastOpenSessionId) return;
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         if (token !== workspaceRestoreTokenRef.current) return; // stale switch
-        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-        if (!s) {
-          // The list loaded but the remembered session is gone — forget it.
-          // When the list itself failed (d === null) keep the memory so a
-          // later switch retries the restore.
+        if (lastOpenSessionId) {
+          const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
+          if (s && workspaceKeyOf(s) === projectKey) {
+            setSelectedSession(s);
+            setSessionKey((k) => k + 1);
+            if (new URLSearchParams(window.location.search).get("session") !== s.id) {
+              router.replace(buildNavigationSearch({ project: workspaceKeyOf(s), worktree: s.cwd, session: s.id }), { scroll: false });
+            }
+            return;
+          }
           if (d) clearLastOpen(projectKey);
-          return;
+          // fall through to fallback: pick most recent session for this project
         }
-        if (workspaceKeyOf(s) !== projectKey) {
-          // Defensive: the remembered session drifted out of this workspace.
-          clearLastOpen(projectKey);
-          return;
-        }
-        // Selecting the session must remount the chat with the session
-        // present: useAgentSession loads content in a mount-only effect, so
-        // the null-session welcome mount from the switch would never load
-        // the restored session's messages.
-        setSelectedSession(s);
-        setSessionKey((k) => k + 1);
-        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+        // 新载入项目无 lastOpen 时，默认进入该项目最近会话（一层精确匹配）
+        const fallback = d?.sessions.filter((x) => workspaceKeyOf(x) === projectKey).sort((a, b) => b.modified.localeCompare(a.modified))[0];
+        if (fallback) {
+          setSelectedSession(fallback);
+          setSessionKey((k) => k + 1);
+          setLastOpenSession(projectKey, fallback.id);
+          if (new URLSearchParams(window.location.search).get("session") !== fallback.id) {
+            router.replace(buildNavigationSearch({ project: workspaceKeyOf(fallback), worktree: fallback.cwd, session: fallback.id }), { scroll: false });
+          }
         }
       })
       .catch(() => {
@@ -685,7 +687,7 @@ export function AppShell() {
       // the default welcome page when none is remembered.
       restoreWorkspaceContext(newProject);
     }
-    router.replace("/", { scroll: false });
+    router.replace(buildNavigationSearch({ project: newProject, worktree: cwd, session: null }), { scroll: false });
   }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
@@ -723,7 +725,7 @@ export function AppShell() {
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.replace(buildNavigationSearch({ project: workspaceKeyOf(session), worktree: session.cwd, session: session.id }), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, router, isMobile, selectedSession]);
 
@@ -742,7 +744,7 @@ export function AppShell() {
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace("/", { scroll: false });
+    router.replace(buildNavigationSearch({ project: cwd, worktree: cwd, session: null }), { scroll: false });
   }, [invalidateWorkspaceRestore, router, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
@@ -790,7 +792,7 @@ export function AppShell() {
     setNewSessionCwd(null);
     setSelectedSession(session);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    router.replace(buildNavigationSearch({ project: workspaceKeyOf(session), worktree: session.cwd, session: session.id }), { scroll: false });
   }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const deliverSessionNotification = useCallback(({
@@ -920,8 +922,11 @@ export function AppShell() {
       transient: false,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    // fork keeps same cwd/project; keep worktree context, only session changes
+    const forkProject = selectedSession ? workspaceKeyOf(selectedSession) : null;
+    const forkWorktree = selectedSession?.cwd ?? null;
+    router.replace(buildNavigationSearch({ project: forkProject, worktree: forkWorktree, session: newSessionId }), { scroll: false });
+  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession, selectedSession]);
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
@@ -946,7 +951,7 @@ export function AppShell() {
       setSystemTools(null);
       setSystemInfoLoading(false);
       setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
+      router.replace(buildNavigationSearch({ project: selectedSession ? workspaceKeyOf(selectedSession) : null, worktree: cwd, session: null }), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, selectedSession, router]);
 
@@ -1070,11 +1075,11 @@ export function AppShell() {
     return () => observer.disconnect();
   }, [windowTitle]);
 
-  // worktree-scoped sessions for the top strip (include transient draft)
+  // worktree-scoped sessions for the top strip (one-layer, no recursion — ADR 0004)
   const worktreeSessions = useMemo(() => {
     const cwd = activeCwd;
     if (!cwd) return [];
-    const base = sessionsWithSelection.filter((s) => s.cwd === cwd || s.cwd.startsWith(cwd + "/"));
+    const base = sessionsWithSelection.filter((s) => s.cwd === cwd);
     if (effectiveNewSessionCwd === cwd && !selectedSession) {
       const draftCwd = effectiveNewSessionCwd;
       // avoid duplicate if base already contains draft id
@@ -1146,7 +1151,7 @@ export function AppShell() {
         selectedSessionId={selectedSession?.id ?? null}
         onSelectSession={handleSelectSession}
         initialSessionId={initialSessionId}
-        skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
+        skipInitialProjectSelection={initialNavigation.sessionId === null && ((initialNavigation.worktreePath ?? initialNavigation.requestedCwd) !== null || initialNavigation.projectKey !== null)}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}

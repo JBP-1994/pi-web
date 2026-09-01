@@ -14,12 +14,16 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    const force = new URL(req.url).searchParams.get("force") === "1";
+    const url = new URL(req.url);
+    const force = url.searchParams.get("force") === "1";
+    const projectKey = url.searchParams.get("projectKey") ?? url.searchParams.get("project");
     const [persistedSessions, runtimeSessions] = await Promise.all([
       listAllSessions({ force }),
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
-    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    let sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    // ADR 0004: one-layer project filter (exact projectKey match, no recursion)
+    if (projectKey) sessions = sessions.filter((s) => s.projectKey === projectKey);
     return NextResponse.json(
       {
         sessions,

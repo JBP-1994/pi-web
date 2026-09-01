@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, typ
 import type { SessionInfo } from "@/lib/types";
 import { getProjectActivity, getRecentProjects } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
+import { loadVisibilityMap, saveVisibilityMap, setProjectDeleted } from "@/lib/project-visibility";
 import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 
@@ -214,11 +215,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
   const [customPathValidating, setCustomPathValidating] = useState(false);
   const [validatedProject, setValidatedProject] = useState<ValidatedProject | null>(null);
   const [addedProjects, setAddedProjects] = useState<{ key: string; root: string }[]>(() => []);
+  const [visibilityMap, setVisibilityMap] = useState<Map<string, { deletedAt: string }>>(() => new Map());
   const [worktreeCache, setWorktreeCache] = useState<Map<string, WorktreeState>>(() => new Map());
   const [revalidatingKeys, setRevalidatingKeys] = useState<Set<string>>(() => new Set());
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
   const [hasMounted, setHasMounted] = useState(false);
   useEffect(() => setHasMounted(true), []);
+  useEffect(() => { setVisibilityMap(loadVisibilityMap()); }, []);
   useEffect(() => {
     const loaded = loadAddedProjects();
     if (loaded.length === 0) {
@@ -261,6 +264,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
     return msg;
   }
   const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
+  const [pendingDeleteProject, setPendingDeleteProject] = useState<{ key: string; root: string; count: number } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [pendingDeleteWorktree, setPendingDeleteWorktree] = useState<{ projectRoot: string; path: string; branch: string | null; isDirty?: boolean } | null>(null);
   const [wtNewFor, setWtNewFor] = useState<string | null>(null);
   const [wtNewBranch, setWtNewBranch] = useState("");
   const wtNewInputRef = useRef<HTMLInputElement>(null);
@@ -280,6 +286,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; completionNotificationSuppressedSessionIds?: string[] };
       setAllSessions(data.sessions);
+      // Q2A/Q4: refresh (force) pulls hidden projects that have sessions back to visible
+      if (force) {
+        const keysWithSessions = new Set(getRecentProjects(data.sessions).map((p) => p.key));
+        setVisibilityMap((prev) => {
+          if (prev.size === 0) return prev;
+          let changed = false;
+          const next = new Map(prev);
+          for (const k of prev.keys()) if (keysWithSessions.has(k)) { next.delete(k); changed = true; }
+          if (changed) saveVisibilityMap(next);
+          return changed ? next : prev;
+        });
+      }
       if (!runningPollAuthoritativeRef.current) {
         currentSuppressedRef.current = new Set(data.completionNotificationSuppressedSessionIds ?? []);
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
@@ -357,7 +375,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
       });
     }
     const hasUnlisted = newlyRunning.some((id) => !allSessions.some((s) => s.id === id));
-    if (completedInBg.length > 0 || hasUnlisted) loadSessions(false, true);
+    // auto-refresh removed per requirement: manual trigger only (refresh button)
+    // if (completedInBg.length > 0 || hasUnlisted) loadSessions(false, true);
+    void hasUnlisted; void completedInBg;
     if (completedWithNotif.length > 0) onBackgroundTaskDone?.();
     previousRunningRef.current = runningSessionIds;
     previousSuppressedRef.current = new Set([...runningSessionIds].filter((id) => currentSuppressedRef.current.has(id) || knownSubagent.has(id)));
@@ -370,7 +390,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
 
   // project helpers
   const recentProjects = useMemo(() => getRecentProjects(allSessions), [allSessions]);
-  const displayProjects = useMemo(() => {
+  const allDisplayProjects = useMemo(() => {
     const byKey = new Map<string, { key: string; root: string }>();
     for (const p of recentProjects) byKey.set(p.key, p);
     for (const p of addedProjects) if (!byKey.has(p.key)) byKey.set(p.key, p);
@@ -390,6 +410,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
       return a.root.toLowerCase() < b.root.toLowerCase() ? -1 : a.root.toLowerCase() > b.root.toLowerCase() ? 1 : 0;
     });
   }, [recentProjects, addedProjects, validatedProject, worktreeCache]);
+  const displayProjects = useMemo(() => allDisplayProjects.filter((p) => !visibilityMap.has(p.key)), [allDisplayProjects, visibilityMap]);
   const projectActivity = useMemo(() => getProjectActivity(allSessions, runningSessionIds, unreadSessionIds), [allSessions, runningSessionIds, unreadSessionIds]);
 
   // backfill non-git recent projects into addedProjects for persistence (Q2)
@@ -472,7 +493,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
   // expand selected project by default
   const restoredRef = useRef(false);
   useEffect(() => {
-    if (allSessions.length === 0 || skipInitialProjectSelection) return;
+    if (allSessions.length === 0) return;
     if (selectedCwd === null) {
       if (initialSessionId && !restoredRef.current) {
         restoredRef.current = true;
@@ -485,6 +506,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
         }
         onInitialRestoreDone?.();
       }
+      if (skipInitialProjectSelection) return;
       const projs = getRecentProjects(allSessions);
       if (projs.length > 0) {
         setSelectedCwd(projs[0].root);
@@ -558,11 +580,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
         saveAddedProjects(next);
         return next;
       });
+      // auto-restore if previously hidden (Q3)
+      setVisibilityMap((prev) => {
+        if (!prev.has(data.projectKey!)) return prev;
+        const next = setProjectDeleted(data.projectKey!, false, prev);
+        showWtToast("已恢复项目，会话已保留");
+        return next;
+      });
       setSelectedCwd(data.cwd);
       setCustomPathOpen(false);
       setExpandedKeys((prev) => { const next = new Set(prev); next.add(data.projectKey!); return next; });
     } catch (e) { setCustomPathError(e instanceof Error ? e.message : String(e)); } finally { setCustomPathValidating(false); }
-  }, [customPathValue, customPathValidating]);
+  }, [customPathValue, customPathValidating, showWtToast]);
 
 
 
@@ -612,13 +641,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
     } catch (e) { const msg = e instanceof Error ? e.message : String(e); setWtError(msg); showWtToast(msg); } finally { setWtBusy(false); }
   }, [wtBusy, selectedCwd, fetchWorktree, showWtToast]);
 
-  // helper to get worktree activity
+  // helper to get worktree activity (one-layer exact cwd — ADR 0004)
   const worktreeActivity = useCallback((worktreePath: string): { running: number; unread: number } => {
     let running = 0, unread = 0;
     for (const s of allSessions) {
-      // session belongs to worktree if cwd equals or is subpath
       const cwd = s.cwd;
-      const belongs = cwd === worktreePath || cwd.startsWith(worktreePath + "/");
+      const belongs = cwd === worktreePath;
       if (!belongs) continue;
       if (runningSessionIds.has(s.id)) running++;
       if (unreadSessionIds.has(s.id)) unread++;
@@ -627,6 +655,104 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
   }, [allSessions, runningSessionIds, unreadSessionIds]);
 
   const selectedProject = projectFor(selectedCwd);
+
+  const handleDeleteProject = useCallback((projectKey: string) => {
+    const rootSessions = allSessions.filter((s) => s.projectKey === projectKey && s.cwd === s.projectRoot);
+    const proj = allDisplayProjects.find((p) => p.key === projectKey);
+    if (rootSessions.length > 0) {
+      setPendingDeleteProject({ key: projectKey, root: proj?.root ?? projectKey, count: rootSessions.length });
+    } else {
+      // 无根会话直接隐藏
+      const wasSelected = selectedProject?.key === projectKey;
+      setVisibilityMap((prev) => setProjectDeleted(projectKey, true, prev));
+      showWtToast("✓ 已隐藏项目");
+      if (wasSelected) {
+        const remaining = allDisplayProjects.filter((p) => p.key !== projectKey && !visibilityMap.has(p.key));
+        if (remaining.length > 0) setSelectedCwd(remaining[0].root);
+        else { setSelectedCwd(null); onCwdChange?.(null, null, null); }
+      }
+    }
+  }, [allSessions, allDisplayProjects, selectedProject, visibilityMap, onCwdChange, showWtToast]);
+
+  const handleConfirmDeleteProject = useCallback(async () => {
+    if (!pendingDeleteProject) return;
+    const { key: projectKey, count } = pendingDeleteProject;
+    const wasSelected = selectedProject?.key === projectKey;
+    const rootSessions = allSessions.filter((s) => s.projectKey === projectKey && s.cwd === s.projectRoot);
+    setDeleteBusy(true);
+    let failed = 0;
+    for (const s of rootSessions) {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(s.id)}`, { method: "DELETE" });
+        if (!res.ok) failed++;
+      } catch { failed++; }
+    }
+    if (failed > 0) showWtToast(`已删除 ${count - failed} 个会话，${failed} 个失败`);
+    else showWtToast(`✓ 已删除 ${count} 个会话`);
+    setAllSessions((prev) => prev.filter((s) => !rootSessions.some((r) => r.id === s.id)));
+    setVisibilityMap((prev) => setProjectDeleted(projectKey, true, prev));
+    if (wasSelected) {
+      const remaining = allDisplayProjects.filter((p) => p.key !== projectKey && !visibilityMap.has(p.key));
+      if (remaining.length > 0) setSelectedCwd(remaining[0].root);
+      else { setSelectedCwd(null); onCwdChange?.(null, null, null); }
+    }
+    setDeleteBusy(false);
+    setPendingDeleteProject(null);
+  }, [pendingDeleteProject, allSessions, selectedProject, allDisplayProjects, visibilityMap, onCwdChange, showWtToast]);
+
+  const handleConfirmDeleteWorktree = useCallback(async (force = false) => {
+    if (!pendingDeleteWorktree) return;
+    const { projectRoot, path } = pendingDeleteWorktree;
+    setDeleteBusy(true);
+    try {
+      const res = await fetch("/api/worktrees", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: projectRoot, path, force }) });
+      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean };
+      if (!res.ok) {
+        if (data.dirty && !force) {
+          setPendingDeleteWorktree((prev) => prev ? { ...prev, isDirty: true } : prev);
+          setDeleteBusy(false);
+          return;
+        }
+        const msg = data.error ?? `HTTP ${res.status}`; setWtError(msg); showWtToast(msg);
+        setDeleteBusy(false);
+        return;
+      }
+      // 同步删除该 worktree 下的一层会话（cwd 精确匹配，不递归子目录）
+      const worktreeSessions = allSessions.filter((s) => s.cwd === path);
+      if (worktreeSessions.length > 0) {
+        let failed = 0;
+        for (const s of worktreeSessions) {
+          try { const r = await fetch(`/api/sessions/${encodeURIComponent(s.id)}`, { method: "DELETE" }); if (!r.ok) failed++; } catch { failed++; }
+        }
+        setAllSessions((prev) => prev.filter((s) => !worktreeSessions.some((w) => w.id === s.id)));
+        if (failed > 0) showWtToast(`✓ 已删除 worktree，${worktreeSessions.length - failed} 个会话已删，${failed} 个失败`);
+        else showWtToast(`✓ 已删除 worktree 及 ${worktreeSessions.length} 个会话`);
+      } else {
+        showWtToast("✓ 已删除 worktree");
+      }
+      setPendingDeleteWorktree(null);
+      if (selectedCwd === path) {
+        // 切到目标 worktree 最近活跃会话已由点击处理，删除后仅切回主 worktree
+        setSelectedCwd(projectRoot);
+        const fallbackSessions = allSessions.filter((s) => s.cwd === projectRoot).sort((a, b) => b.modified.localeCompare(a.modified));
+        if (fallbackSessions.length > 0) onSelectSession(fallbackSessions[0]);
+      }
+      void fetchWorktree(projectRoot);
+    } catch (e) { const msg = e instanceof Error ? e.message : String(e); setWtError(msg); showWtToast(msg); }
+    finally { setDeleteBusy(false); }
+  }, [pendingDeleteWorktree, allSessions, selectedCwd, fetchWorktree, showWtToast, onSelectSession]);
+
+  const handleRestoreProject = useCallback((projectKey: string, projectRoot: string) => {
+    setVisibilityMap((prev) => setProjectDeleted(projectKey, false, prev));
+    setAddedProjects((prev) => {
+      if (prev.some((p) => p.key === projectKey)) return prev;
+      const next = [...prev, { key: projectKey, root: projectRoot }];
+      saveAddedProjects(next);
+      return next;
+    });
+    setExpandedKeys((prev) => { const next = new Set(prev); next.add(projectKey); return next; });
+    showWtToast("已恢复项目");
+  }, [showWtToast]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
@@ -652,7 +778,37 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
         </div>
       </div>
       {wtToast && (
-        <div style={{ position: "absolute", top: 8, right: 8, left: 8, zIndex: 50, background: "var(--bg-panel)", border: "1px solid #fecaca", color: "#dc2626", fontSize: 11, lineHeight: 1.4, padding: "8px 10px", borderRadius: 8, boxShadow: "0 6px 20px rgba(0,0,0,0.12)", overflowWrap: "anywhere" }}>{wtToast}</div>
+        <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 1200, background: wtToast.startsWith("✓") || wtToast.includes("已删除") || wtToast.includes("已隐藏") || wtToast.includes("已恢复") ? "var(--bg-panel)" : "var(--bg-panel)", border: `1px solid ${wtToast.includes("失败") || wtToast.includes("不存在") || wtToast.includes("权限") ? "#fecaca" : "var(--border)"}`, color: wtToast.includes("失败") || wtToast.includes("不存在") || wtToast.includes("权限") ? "#dc2626" : "var(--text)", fontSize: 12, lineHeight: 1.4, padding: "10px 14px", borderRadius: 20, boxShadow: "0 8px 24px rgba(0,0,0,0.16)", overflowWrap: "anywhere", display: "flex", alignItems: "center", gap: 6, maxWidth: "90vw" }}><span>{wtToast}</span></div>
+      )}
+      {pendingDeleteProject && (
+        <div role="presentation" onClick={(e) => { if (!deleteBusy && e.target === e.currentTarget) setPendingDeleteProject(null); }} style={{ position: "fixed", inset: 0, zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.4)" }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="delete-project-title" onClick={(e) => e.stopPropagation()} style={{ width: 420, maxWidth: "100%", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 12px 36px rgba(0,0,0,0.24)", overflow: "hidden" }}>
+            <div style={{ padding: "18px 18px 14px" }}>
+              <div id="delete-project-title" style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>删除项目？</div>
+              <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6, color: "var(--text-muted)" }}>将同时删除该根目录下的 <span style={{ color: "#ef4444", fontWeight: 600 }}>{pendingDeleteProject.count}</span> 个会话，子文件夹会话保留。</div>
+              <code style={{ display: "block", marginTop: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, overflowWrap: "anywhere" }}>{pendingDeleteProject.root}</code>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
+              <button type="button" onClick={() => setPendingDeleteProject(null)} disabled={deleteBusy} style={{ height: 32, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: deleteBusy ? "not-allowed" : "pointer", fontSize: 12 }}>取消</button>
+              <button type="button" onClick={() => void handleConfirmDeleteProject()} disabled={deleteBusy} style={{ height: 32, padding: "0 12px", border: "1px solid #ef4444", borderRadius: 5, background: "#ef4444", color: "white", cursor: deleteBusy ? "wait" : "pointer", opacity: deleteBusy ? 0.7 : 1, fontSize: 12, fontWeight: 600 }}>{deleteBusy ? "删除中…" : "删除"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingDeleteWorktree && (
+        <div role="presentation" onClick={(e) => { if (!deleteBusy && e.target === e.currentTarget) setPendingDeleteWorktree(null); }} style={{ position: "fixed", inset: 0, zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.4)" }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="delete-worktree-title" onClick={(e) => e.stopPropagation()} style={{ width: 420, maxWidth: "100%", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 12px 36px rgba(0,0,0,0.24)", overflow: "hidden" }}>
+            <div style={{ padding: "18px 18px 14px" }}>
+              <div id="delete-worktree-title" style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{pendingDeleteWorktree.isDirty ? "强制删除 worktree？" : "删除 worktree？"}</div>
+              <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6, color: "var(--text-muted)" }}>{(() => { const c = allSessions.filter((s) => s.cwd === pendingDeleteWorktree.path).length; const base = c > 0 ? `将同时删除该 worktree 下的 ${c} 个会话（不递归子目录）` : "确认删除该 worktree 检出"; return pendingDeleteWorktree.isDirty ? `${base}，强制删除将丢失未提交修改。` : `${base}？`; })()}</div>
+              <code style={{ display: "block", marginTop: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, overflowWrap: "anywhere" }}>{pendingDeleteWorktree.branch ? `${pendingDeleteWorktree.branch} — ${pendingDeleteWorktree.path}` : pendingDeleteWorktree.path}</code>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
+              <button type="button" onClick={() => setPendingDeleteWorktree(null)} disabled={deleteBusy} style={{ height: 32, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: deleteBusy ? "not-allowed" : "pointer", fontSize: 12 }}>取消</button>
+              <button type="button" onClick={() => void handleConfirmDeleteWorktree(pendingDeleteWorktree.isDirty)} disabled={deleteBusy} style={{ height: 32, padding: "0 12px", border: "1px solid #ef4444", borderRadius: 5, background: "#ef4444", color: "white", cursor: deleteBusy ? "wait" : "pointer", opacity: deleteBusy ? 0.7 : 1, fontSize: 12, fontWeight: 600 }}>{deleteBusy ? "删除中…" : pendingDeleteWorktree.isDirty ? "强制删除" : "删除"}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}>
@@ -733,6 +889,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"><line x1="5" y1="1" x2="5" y2="9" /><line x1="1" y1="5" x2="9" y2="5" /></svg>
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); void handleDeleteProject(project.key); }}
+                  title="隐藏项目（会话保留）"
+                  style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 4, flexShrink: 0 }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></svg>
+                </button>
               </div>
 
               {/* new worktree input — fixed height to avoid jitter */}
@@ -772,7 +938,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
                       );
                     }
                     return (
-                      <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 4px 4px 8px", margin: "1px 8px 1px 0", borderRadius: 6, background: isCurrent ? "var(--bg-selected)" : "transparent", borderLeft: isCurrent ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer" }} onClick={() => setSelectedCwd(wt.path)}>
+                      <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 4px 4px 8px", margin: "1px 8px 1px 0", borderRadius: 6, background: isCurrent ? "var(--bg-selected)" : "transparent", borderLeft: isCurrent ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer" }} onClick={() => {
+                        setSelectedCwd(wt.path);
+                        // 切换 worktree 同时切到目标 worktree 最近活跃会话
+                        const targetSessions = allSessions.filter((s) => s.cwd === wt.path).sort((a, b) => b.modified.localeCompare(a.modified));
+                        if (targetSessions.length > 0) {
+                          const withActivity = targetSessions.find((s) => runningSessionIds.has(s.id) || unreadSessionIds.has(s.id));
+                          onSelectSession(withActivity ?? targetSessions[0]);
+                        }
+                      }}>
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={wt.isMain ? "var(--text-dim)" : "var(--accent)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>
                         <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 11, color: isCurrent ? "var(--text)" : "var(--text-muted)" }} />
                         {wt.isMain && <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>{t("sidebar.main")}</span>}
@@ -783,7 +957,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
                           </span>
                         )}
                         {!wt.isMain && (
-                          <button onClick={(e) => { e.stopPropagation(); void handleRemoveWorktree(project.root, wt.path, false); }} disabled={wtBusy} title={t("sidebar.removeWorktreeTitle", { path: wt.path })} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 4 }} onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}>
+                          <button onClick={(e) => { e.stopPropagation(); setPendingDeleteWorktree({ projectRoot: project.root, path: wt.path, branch: wt.branch }); }} disabled={wtBusy} title={t("sidebar.removeWorktreeTitle", { path: wt.path })} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 4 }} onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}>
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></svg>
                           </button>
                         )}
