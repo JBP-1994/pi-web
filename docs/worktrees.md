@@ -33,7 +33,7 @@ Choose `New worktree...` from the worktree menu and enter a branch name.
 Pi Web creates the checkout at:
 
 ```text
-<repo>-worktrees/<branch>
+~/worktrees/<repo>/<branch>
 ```
 
 For example, if the main checkout is:
@@ -45,7 +45,7 @@ For example, if the main checkout is:
 and you create branch `codex/worktree-help`, the worktree is created under:
 
 ```text
-/Users/alex/Documents/Workspace/pi-web-worktrees/codex-worktree-help
+~/worktrees/pi-web/codex-worktree-help
 ```
 
 If the branch already exists, Pi Web adds a worktree for that branch. If it does not exist, Pi Web creates the branch from the current `HEAD`.

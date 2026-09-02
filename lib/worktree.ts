@@ -1,5 +1,6 @@
 import { execFile } from "child_process";
 import { existsSync, mkdirSync, realpathSync } from "fs";
+import { homedir } from "os";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { allowFileRoot } from "./allowed-roots";
@@ -69,17 +70,25 @@ function realPathOrSelf(filePath: string): string {
 }
 
 /**
- * addWorktree() places worktrees in `<repoRoot>-worktrees/<dir>`. When such a
- * directory no longer exists (worktree removed), group its sessions back
- * under the main repo instead of letting them dangle as a phantom project.
- * The dir name is the sanitized branch name — close enough for display.
+ * addWorktree() places worktrees centrally in `~/worktrees/<repo>/<dir>` (and
+ * historically in `<repoRoot>-worktrees/<dir>`). When such a directory no
+ * longer exists (worktree removed), group its sessions back under the main
+ * repo instead of letting them dangle as a phantom project.
  */
 function inferRemovedWorktree(cwd: string): ProjectInfo | null {
-  const parent = dirname(cwd);
-  if (!parent.endsWith("-worktrees")) return null;
-  const repoRoot = parent.slice(0, -"-worktrees".length);
-  if (!repoRoot || !existsSync(join(repoRoot, ".git"))) return null;
-  return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+  // Centralized layout: ~/worktrees/<repo>/<branch> — map is persisted on create
+  try {
+    const centralMapPath = join(homedir(), ".pi", "agent", "worktree-central-map.json");
+    if (existsSync(centralMapPath)) {
+      const raw = require("fs").readFileSync(centralMapPath, "utf8");
+      const map = JSON.parse(raw) as Record<string, string>;
+      const repoRoot = map[cwd] ?? map[realPathOrSelf(cwd)];
+      if (repoRoot && existsSync(join(repoRoot, ".git"))) {
+        return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+      }
+    }
+  } catch {}
+  return null;
 }
 
 export async function resolveProject(cwd: string): Promise<ProjectInfo> {
@@ -198,7 +207,7 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
   if (!dirName) throw new Error(`Invalid branch name: ${branch}`);
 
   const repoRoot = await getRepoRoot(cwd);
-  const baseDir = `${resolve(repoRoot)}-worktrees`;
+  const baseDir = join(homedir(), "worktrees", basename(resolve(repoRoot)));
   const worktreePath = join(baseDir, dirName);
   if (existsSync(worktreePath)) {
     throw new Error(`Directory already exists: ${worktreePath}`);
@@ -225,6 +234,17 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
   }
 
   allowFileRoot(worktreePath);
+  // Persist centralized mapping for inferRemovedWorktree after deletion
+  try {
+    const mapPath = join(homedir(), ".pi", "agent", "worktree-central-map.json");
+    const fs = require("fs");
+    let map: Record<string, string> = {};
+    if (existsSync(mapPath)) map = JSON.parse(fs.readFileSync(mapPath, "utf8"));
+    map[worktreePath] = realPathOrSelf(repoRoot);
+    map[realPathOrSelf(worktreePath)] = realPathOrSelf(repoRoot);
+    fs.mkdirSync(dirname(mapPath), { recursive: true });
+    fs.writeFileSync(mapPath, JSON.stringify(map, null, 2));
+  } catch {}
   invalidateProjectCache();
   return { path: worktreePath, branch: trimmed };
 }
@@ -240,6 +260,16 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
   } catch (error) {
     throw new Error(extractGitError(error));
   }
+  try {
+    const mapPath = join(homedir(), ".pi", "agent", "worktree-central-map.json");
+    const fs = require("fs");
+    if (existsSync(mapPath)) {
+      const map = JSON.parse(fs.readFileSync(mapPath, "utf8")) as Record<string, string>;
+      delete map[target.path];
+      delete map[realPathOrSelf(target.path)];
+      fs.writeFileSync(mapPath, JSON.stringify(map, null, 2));
+    }
+  } catch {}
   invalidateProjectCache();
 }
 

@@ -33,7 +33,7 @@ worktree 切换器决定 Pi Web 接下来使用哪个 checkout。
 Pi Web 会把 checkout 放在：
 
 ```text
-<repo>-worktrees/<branch>
+~/worktrees/<repo>/<branch>
 ```
 
 例如 main checkout 是：
@@ -45,7 +45,7 @@ Pi Web 会把 checkout 放在：
 新建 `codex/worktree-help` 时，目录会是：
 
 ```text
-/Users/alex/Documents/Workspace/pi-web-worktrees/codex-worktree-help
+~/worktrees/pi-web/codex-worktree-help
 ```
 
 如果这个 branch 已存在，Pi Web 会为它添加 worktree。如果 branch 不存在，Pi Web 会从当前 `HEAD` 创建这个 branch。

@@ -755,7 +755,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
   }, [showWtToast]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative", userSelect: "none", WebkitUserSelect: "none" }}>
       {customPathOpen && (
         <DirectoryPicker initialPath={customPathValue} busy={customPathValidating} error={customPathError} onCancel={() => { setCustomPathOpen(false); setCustomPathError(null); }} onSelect={(path) => void commitCustomPath(path)} />
       )}
@@ -892,7 +892,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, initialSess
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); void handleDeleteProject(project.key); }}
-                  title="隐藏项目（会话保留）"
+                  title="删除项目（根目录会话一并删除）"
                   style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 4, flexShrink: 0 }}
                   onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}

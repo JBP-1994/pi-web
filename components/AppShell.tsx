@@ -330,6 +330,8 @@ export function AppShell() {
   const autoNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
   activeSessionIdRef.current = selectedSession?.id ?? null;
+  const selectedSessionRef = useRef<SessionInfo | null>(selectedSession);
+  selectedSessionRef.current = selectedSession;
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -539,10 +541,11 @@ export function AppShell() {
   // carry projectKey, so use the active project identity until hydration.
   useEffect(() => {
     if (!selectedSession) return;
-    const projectKey = selectedSession.projectKey
-      ?? activeProjectKeyRef.current
-      ?? workspaceKeyOf(selectedSession);
-    setLastOpenSession(projectKey, selectedSession.id);
+    // 按 worktree（cwd）记忆最近会话：切到同项目另一 worktree 时恢复各自会话，
+    // 避免无会话 worktree 被同项目其它 worktree 的会话重定向
+    const cwd = selectedSession.cwd;
+    if (!cwd) return;
+    setLastOpenSession(cwd, selectedSession.id);
   }, [selectedSession]);
 
   useEffect(() => {
@@ -585,20 +588,22 @@ export function AppShell() {
     return () => controller.abort();
   }, [initialNavigation]);
 
-  // Restore the workspace's last open session after switching to it. Called
+  // Restore the worktree's last open session after switching to it. Called
   // from handleCwdChange once the outgoing context has been reset. The session
   // is looked up against the live list so a deleted or drifted session falls
   // back to the default welcome page instead of erroring.
-  const restoreWorkspaceContext = useCallback((projectKey: string) => {
+  const restoreWorkspaceContext = useCallback((cwd: string) => {
     const token = ++workspaceRestoreTokenRef.current;
-    const lastOpenSessionId = getLastOpenSession(projectKey);
+    // 按 worktree（cwd）粒度恢复：项目级 lastOpen 会把用户拉去同项目其它
+    // 有会话的 worktree（B1 无会话 → 误跳 B2）
+    const lastOpenSessionId = getLastOpenSession(cwd);
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         if (token !== workspaceRestoreTokenRef.current) return; // stale switch
         if (lastOpenSessionId) {
           const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-          if (s && workspaceKeyOf(s) === projectKey) {
+          if (s && s.cwd === cwd) {
             setSelectedSession(s);
             setSessionKey((k) => k + 1);
             if (new URLSearchParams(window.location.search).get("session") !== s.id) {
@@ -606,15 +611,15 @@ export function AppShell() {
             }
             return;
           }
-          if (d) clearLastOpen(projectKey);
-          // fall through to fallback: pick most recent session for this project
+          if (d) clearLastOpen(cwd);
+          // fall through to fallback: pick most recent session for this worktree
         }
-        // 新载入项目无 lastOpen 时，默认进入该项目最近会话（一层精确匹配）
-        const fallback = d?.sessions.filter((x) => workspaceKeyOf(x) === projectKey).sort((a, b) => b.modified.localeCompare(a.modified))[0];
+        // 新载入 worktree 无 lastOpen 时，默认进入该 worktree 最近会话（一层精确匹配）
+        const fallback = d?.sessions.filter((x) => x.cwd === cwd).sort((a, b) => b.modified.localeCompare(a.modified))[0];
         if (fallback) {
           setSelectedSession(fallback);
           setSessionKey((k) => k + 1);
-          setLastOpenSession(projectKey, fallback.id);
+          setLastOpenSession(cwd, fallback.id);
           if (new URLSearchParams(window.location.search).get("session") !== fallback.id) {
             router.replace(buildNavigationSearch({ project: workspaceKeyOf(fallback), worktree: fallback.cwd, session: fallback.id }), { scroll: false });
           }
@@ -637,7 +642,7 @@ export function AppShell() {
     if (!cwd) return;
     const newProject = projectKey ?? projectRoot ?? cwd;
     const currentProject = activeProjectKeyRef.current
-      ?? (selectedSession ? workspaceKeyOf(selectedSession) : null);
+      ?? (selectedSessionRef.current ? workspaceKeyOf(selectedSessionRef.current) : null);
     activeProjectKeyRef.current = newProject;
 
     // Keep the project identity in sync during the initial URL restore without
@@ -646,15 +651,18 @@ export function AppShell() {
       suppressCwdBumpRef.current = false;
       return;
     }
+    // 点击会话后 onCwdChange 回流同步 cwd 到当前会话时，不能清空会话或覆盖其 URL
+    if (selectedSessionRef.current?.cwd === cwd) return;
     // The server may hydrate a normalized key after a custom cwd is already
     // active. Updating identity for the exact same cwd is not a user switch.
     if (currentFreshCwd === cwd && currentProject !== newProject) return;
-    // Existing sessions stay open when the worktree selector moves within the
-    // same project. A fresh composer must remount when its effective cwd moves,
-    // otherwise its already-created runtime would keep sending to the old cwd.
+    // 同项目切换 worktree：仅当当前已是目标 cwd 的空态（幂等回流）才保留；
+    // 否则会话属于其它 worktree 时必须清空，展示目标 worktree 的空态，
+    // 避免"有会话 worktree → 无会话 worktree"携带旧会话内容
     if (
       currentProject === newProject
-      && (selectedSession !== null || currentFreshCwd === cwd)
+      && selectedSessionRef.current === null
+      && currentFreshCwd === cwd
     ) {
       return;
     }
@@ -683,14 +691,19 @@ export function AppShell() {
       setFileTabs([]);
       setActiveFileTabId(null);
       setRightPanelOpen(false);
-      // Restore the workspace we switched to: its last open session, or keep
-      // the default welcome page when none is remembered.
-      restoreWorkspaceContext(newProject);
+      // Restore the worktree we switched to: its last open session, or keep
+      // the default welcome page when none is remembered. Restore is scoped to
+      // the exact worktree cwd so a no-session worktree never jumps to a
+      // session that belongs to another worktree of the same project.
+      restoreWorkspaceContext(cwd);
     }
     router.replace(buildNavigationSearch({ project: newProject, worktree: cwd, session: null }), { scroll: false });
-  }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    // 未开始的 transient（id 是草稿 uuid，非真实会话；与 WorktreeSessionTabs 同判定）
+    // 点击应保持当前工作区空态：不写假 session URL、不重挂 ChatWindow 去加载 404
+    if (session.transient && !session.name && !session.firstMessage) return;
     invalidateWorkspaceRestore();
     activeNewSessionDraftKeyRef.current = null;
     // Re-clicking the already-open session must not remount the chat and
@@ -1135,9 +1148,11 @@ export function AppShell() {
   useEffect(() => {
     if (!activeCwd) return;
     if (sessionCatalog.length === 0) return;
+    // 已选中会话（可能正从其它 worktree 切过来）时绝不自动建会话，
+    // 否则同一批次 activeCwd 仍是旧 worktree，会误判"无会话"并清空刚选中的会话
+    if (selectedSession) return;
     // don't auto-create while a transient for this worktree already exists
     if (effectiveNewSessionCwd === activeCwd) return;
-    if (selectedSession && (selectedSession.cwd === activeCwd || selectedSession.cwd.startsWith(activeCwd + "/"))) return;
     if (worktreeSessions.length === 0) {
       handleTabCreate();
     }
