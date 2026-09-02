@@ -2,7 +2,7 @@
 
 This repo publishes two artifacts for each release:
 
-- npm package: `@agegr/pi-web`
+- npm package: `@amber__xxx/pi-web`
 - GitHub Release: `agegr/pi-web`
 
 Use this checklist from a clean `main` checkout.
@@ -21,7 +21,7 @@ Expected:
 
 - `git status` is clean, or only contains changes you intentionally plan to release.
 - GitHub is authenticated as an account that can push and create releases.
-- npm is authenticated as an account that can publish `@agegr/pi-web`.
+- npm is authenticated as an account that can publish `@amber__xxx/pi-web`.
 
 ## 2. Publish to npm
 
@@ -39,11 +39,11 @@ Notes:
 
 - This bumps `package.json` and `package-lock.json`.
 - It intentionally runs a production build. Do not run `next build` during normal development; release work is the exception.
-- If `npm view @agegr/pi-web version` briefly shows the previous version, check the exact version instead:
+- If `npm view @amber__xxx/pi-web version` briefly shows the previous version, check the exact version instead:
 
 ```bash
-npm view @agegr/pi-web@<version> version --registry https://registry.npmjs.org/
-npm view @agegr/pi-web versions --json --registry https://registry.npmjs.org/
+npm view @amber__xxx/pi-web@<version> version --registry https://registry.npmjs.org/
+npm view @amber__xxx/pi-web versions --json --registry https://registry.npmjs.org/
 ```
 
 ## 3. Commit the Version Bump
@@ -103,7 +103,7 @@ Suggested structure:
 
 ### 内部调整
 
-- 发布 npm 包 `@agegr/pi-web@<version>`。
+- 发布 npm 包 `@amber__xxx/pi-web@<version>`。
 
 ## English
 
@@ -123,7 +123,7 @@ Prepared from commits in `v<previous>..v<version>`.
 
 ### Internal
 
-- Published npm package `@agegr/pi-web@<version>`.
+- Published npm package `@amber__xxx/pi-web@<version>`.
 ```
 
 ## 6. Create or Update the GitHub Release
@@ -164,7 +164,7 @@ EOF
 
 ```bash
 gh release view v<version> --repo agegr/pi-web
-npm view @agegr/pi-web@<version> version --registry https://registry.npmjs.org/
+npm view @amber__xxx/pi-web@<version> version --registry https://registry.npmjs.org/
 git status --short --branch
 git log --oneline --decorate -3
 ```
