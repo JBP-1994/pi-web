@@ -26,6 +26,8 @@ const nextConfig: NextConfig = {
   // from other machines on the same LAN.
   allowedDevOrigins: [
     "127.0.0.1",
+    "100.*.*.*",
+    "*.ts.net",
     "10.*.*.*",
     // 172.16.0.0/12
     "172.16.*.*",
