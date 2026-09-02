@@ -241,6 +241,21 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
   const { isDark } = useTheme();
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
+  const syntaxStyle = useMemo(() => {
+    const base = isDark ? vscDarkPlus : vs;
+    // vs uses backgroundColor, vscDarkPlus uses background (shorthand).
+    // Merged <pre> would then have both -> React warns. Strip both so
+    // only customStyle's backgroundColor remains.
+    const next: Record<string, unknown> = { ...base };
+    for (const k of ['pre[class*="language-"]', "hljs"] as const) {
+      const v = (next[k] as Record<string, string> | undefined);
+      if (!v) continue;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { background, backgroundColor, ...rest } = v;
+      next[k] = rest;
+    }
+    return next as typeof base;
+  }, [isDark]);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -271,7 +286,7 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
             fontSize: 12.5,
             lineHeight: 1.62,
             overflowX: "auto",
-            background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+            backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
           }}
         >
           <code style={{ fontFamily: "var(--font-mono)" }}>{code}</code>
@@ -279,7 +294,7 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
       ) : (
         <SyntaxHighlighter
           language={lang || "text"}
-          style={isDark ? vscDarkPlus : vs}
+          style={syntaxStyle}
           showLineNumbers
           lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
           customStyle={{
@@ -288,7 +303,7 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
             fontSize: 12.5,
             lineHeight: 1.62,
             borderRadius: 0,
-            background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+            backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
           }}
           codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
         >
